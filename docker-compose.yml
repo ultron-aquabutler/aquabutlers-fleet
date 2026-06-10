@@ -1,0 +1,94 @@
+version: "2.4"
+
+networks:
+  aquabutlers-net:
+    driver: bridge
+
+volumes:
+  shared-config:
+
+services:
+  njspc:
+    build:
+      context: ./AquaButler-Control-njsPC
+    ports:
+      - "4200:4200"
+    networks:
+      - aquabutlers-net
+    volumes:
+      - shared-config:/app/config
+    environment:
+      - MQTT_BROKER_URL=mqtt://mqtt:1883
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+
+  dashboard:
+    build:
+      context: ./AquaButler-Control-dashPanel
+    ports:
+      - "5150:5150"
+    networks:
+      - aquabutlers-net
+    volumes:
+      - shared-config:/app/config
+    environment:
+      - MQTT_BROKER_URL=mqtt://mqtt:1883
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+
+  rem:
+    build:
+      context: ./AquaButler-Control-REM
+    ports:
+      - "7070:7070"
+    networks:
+      - aquabutlers-net
+    volumes:
+      - shared-config:/app/config
+    environment:
+      - MQTT_BROKER_URL=mqtt://mqtt:1883
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    networks:
+      - aquabutlers-net
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - shared-config:/mosquitto/data
+    restart: unless-stopped
+
+  aqualinkd:
+    # Uses Balena-ready Dockerfile (in root of AqualinkD repo)
+    # NOTE: %%BALENA_MACHINE_NAME%% template variable is substituted by Balena during build
+    build:
+      context: ./AqualinkD
+    ports:
+      - "6171:6171"
+    networks:
+      - aquabutlers-net
+    volumes:
+      - shared-config:/aquadconf
+    devices:
+      # Serial device for RS-485 communication with Jandy AquaLink
+      # Map to /dev/serial0 or /dev/ttyUSB0 depending on hardware
+      - "/dev/serial0:/dev/serial0"
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+    environment:
+      - MQTT_BROKER_URL=mqtt://mqtt:1883
+    restart: unless-stopped
+    depends_on:
+      - mqtt

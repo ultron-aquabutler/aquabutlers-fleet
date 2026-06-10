@@ -1,0 +1,23 @@
+name: aquabutlers-fleet
+type: sw.application
+description: >-
+  AquaButlers unified fleet: njsPC pool controller, dashboard panel, REM module,
+  MQTT broker, and AqualinkD — running as a Balena multi-container application.
+assets:
+  repository:
+    type: blob.asset
+    data:
+      url: "https://github.com/brydenver2/aquabutlers-fleet.git"
+data:
+  applicationEnvironmentVariables:
+    - MQTT_BROKER_URL: "mqtt://mqtt:1883"
+    - SUPABASE_URL: ""
+    - SUPABASE_KEY: ""
+  defaultDeviceType: raspberrypi4-64
+  supportedDeviceTypes:
+    - raspberrypi4-64
+    - raspberry-pi2
+    - raspberrypi3
+    - raspberrypi3-64
+    - fincm3
+version: 1.0.0
