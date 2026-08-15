@@ -21,3 +21,13 @@ data:
     - raspberrypi3-64
     - fincm3
 version: 1.0.0
+# OpenBalena registry image sources for CPE components
+# These images must be pushed to the local registry (registry.loc.wallacearizona.us)
+# before the builder can use them for fleet releases
+docker:
+  njspc:
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc:latest
+  dashboard:
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:latest
+  rem:
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/relay-equipment-manager:latest
