@@ -110,6 +110,69 @@ services:
       - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/poolController"
       - "org.opencontainers.image.licenses=AGPL-3.0-only"
 
+  # ----------------------------------------------------------------------
+  # relayEquipmentManager (REM) — companion service to poolController
+  # ----------------------------------------------------------------------
+  # Mirrors the standalone balena.yml at
+  # ultron-aquabutler/AquaButler-Control-REM/balena.yml (PR #1 on that
+  # repo, branch feat/aqb-013-balena-yml). Same fields, same device
+  # bindings, different image reference — this fleet pulls the multi-arch
+  # build from GHCR until OpenBalena mirrors it.
+  #
+  # REM is a HAT-stack relay/sensor controller. It does NOT use RS-485 —
+  # poolController owns /dev/ttyUSB* and /dev/ttyACM* for the Pentair
+  # serial bus. If a future REM variant needs RS-485 (e.g. MEGA-IND
+  # modbus), coordinate bus arbitration with poolController's `devices:`
+  # block before binding /dev/ttyUSB* here.
+  relayEquipmentManager:
+    image: ghcr.io/ultron-aquabutler/relay-equipment-manager:sha-4febffc
+    hostname: rem
+    user: node
+    restart: always
+    # Host ports sourced from defaultConfig.json -> web.servers.*:
+    #   8080  - HTTP UI / REST / Socket.IO
+    #   8081  - HTTPS (opt-in via web.servers.https.enabled)
+    #   1900  - SSDP / UPnP discovery (UDP)
+    ports:
+      - "8080:8080/tcp"
+      - "8081:8081/tcp"
+      - "1900:1900/udp"
+    volumes:
+      - "rem-data:/app/data"
+      - "rem-config:/app/config.json"
+      - "rem-logs:/app/logs"
+      - "rem-backups:/app/backups"
+    # Hardware device bindings — REM's GPIO / I2C / SPI / 1-Wire surface.
+    # RS-485 is intentionally absent; poolController owns the bus.
+    devices:
+      - "/dev/gpiomem:/dev/gpiomem"
+      - "/dev/gpiochip0:/dev/gpiochip0"
+      - "/dev/i2c-1:/dev/i2c-1"
+      - "/dev/spidev0.0:/dev/spidev0.0"
+      - "/dev/spidev0.1:/dev/spidev0.1"
+      - "/sys/bus/w1:/sys/bus/w1"
+    environment:
+      - "TZ=UTC"
+      - "NODE_ENV=production"
+      - "UDEV=1"
+      - "MQTT_BROKER_URL=mqtt://mqtt:1883"
+    # REM's Express server answers GET / with the dashboard HTML.
+    healthcheck:
+      interval: 60s
+      timeout: 8s
+      start_period: 60s
+      retries: 4
+      path: /
+      port: 8080
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=relay-equipment-manager"
+      - "org.opencontainers.image.description=Relay Equipment Manager — GPIO/I2C/SPI/1-Wire relay and sensor control. AquaButlers fleet member."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/AquaButler-Control-REM"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
 # ----------------------------------------------------------------------------
 # Named volumes — supervisor-managed persistent storage
 # ----------------------------------------------------------------------------
@@ -119,3 +182,7 @@ volumes:
   poolcontroller-logs:
   poolcontroller-bindings:
   poolcontroller-config:
+  rem-data:
+  rem-config:
+  rem-logs:
+  rem-backups:
