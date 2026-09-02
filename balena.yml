@@ -50,6 +50,10 @@ docker:
     image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:pending-pin
   rem:
     image: registry.loc.wallacearizona.us/ultron-aquabutler/relay-equipment-manager:pending-pin
+  # aquabutlers-mqtt-bridge (VISION.md #1) — offline-resilient MQTT bridge.
+  # Image SHA is set after first PR merge; pinning tracks fleet reproducibility.
+  mqtt-bridge:
+    image: ghcr.io/ultron-aquabutler/aquabutlers-mqtt-bridge:sha-601483e
 
 # ----------------------------------------------------------------------------
 # poolController service — port of AQB-011 PR #1
@@ -174,6 +178,57 @@ services:
       - "org.opencontainers.image.licenses=AGPL-3.0-only"
 
 # ----------------------------------------------------------------------------
+# aquabutlers-mqtt-bridge service — offline-resilient MQTT bridge (VISION #1)
+# ----------------------------------------------------------------------------
+# Sibling of poolController/REM. Bridges the in-fleet Mosquitto (`mqtt:1883`)
+# to the central broker (`mqtt.aquabutlers.com:8883`). On outage, buffers
+# outbox to SQLite in /data/bridge.db and drains in insertion order on
+# reconnect. Critical commands (heater/pump/valve/emergency) are forwarded at
+# QoS 2 — exactly-once — so the central broker cannot silently drop them.
+#
+# Central-broker credentials (BRIDGE_CENTRAL_USER / BRIDGE_CENTRAL_PASS) are
+# injected via `balena env set` per device; never commit them here.
+#
+# Repo: https://github.com/ultron-aquabutler/aquabutlers-mqtt-bridge
+  mqtt-bridge:
+    image: ghcr.io/ultron-aquabutler/aquabutlers-mqtt-bridge:sha-601483e
+    hostname: mqtt-bridge
+    user: node
+    restart: always
+    # Pure network client — no host ports exposed.
+    volumes:
+      - "mqtt-bridge-data:/data"
+    environment:
+      - "TZ=UTC"
+      - "NODE_ENV=production"
+      - "BRIDGE_DB_PATH=/data/bridge.db"
+      - "BRIDGE_LOCAL_URL=mqtt://mqtt:1883"
+      # Central broker URL/credentials are device-env overrides.
+      - "BRIDGE_CENTRAL_URL=mqtts://mqtt.aquabutlers.com:8883"
+      - "BRIDGE_CENTRAL_USER="
+      - "BRIDGE_CENTRAL_PASS="
+      - "BRIDGE_FORWARD_FILTERS=aqb/+/+/telemetry/#,aqb/+/+/state/#,aqb/+/+/cmd/#"
+      - "BRIDGE_CRITICAL_FILTERS=aqb/+/+/cmd/heater/#,aqb/+/+/cmd/pump/#,aqb/+/+/cmd/valve/#,aqb/+/+/cmd/emergency/#"
+      - "BRIDGE_DEFAULT_QOS=0"
+      - "BRIDGE_BATCH_SIZE=100"
+      - "BRIDGE_DRAIN_INTERVAL_MS=1000"
+    # No HTTP port — the healthcheck asserts the SQLite outbox is mounted.
+    healthcheck:
+      interval: 60s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
+      test: ["CMD", "node", "-e", "require('fs').accessSync('/data/bridge.db',require('fs').constants.F_OK)"]
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=aquabutlers-mqtt-bridge"
+      - "org.opencontainers.image.description=Offline-resilient MQTT bridge for AquaButler CPE — SQLite outbox + QoS 2 for critical commands."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/aquabutlers-mqtt-bridge"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
+# ----------------------------------------------------------------------------
 # Named volumes — supervisor-managed persistent storage
 # ----------------------------------------------------------------------------
 volumes:
@@ -186,3 +241,5 @@ volumes:
   rem-config:
   rem-logs:
   rem-backups:
+  # mqtt-bridge SQLite outbox — survives Pi power loss / container restart.
+  mqtt-bridge-data:
