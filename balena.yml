@@ -1,3 +1,12 @@
+# balena.yml — AquaButlers fleet manifest
+#
+# Schema: balena.yml v1.1+. Top-level v1 keys (name, data.*, docker.*) carry
+# image sources + per-fleet env + device-type matrix; the `services:` block
+# is the v2 service-level override layer.
+#
+# Image references are SHA-pinned (NOT :latest) so `balena push` reproduces
+# the exact same fleet state every time.
+
 name: aquabutlers-fleet
 type: sw.application
 description: >-
@@ -11,6 +20,8 @@ assets:
 data:
   applicationEnvironmentVariables:
     - MQTT_BROKER_URL: "mqtt://mqtt:1883"
+    # SUPABASE_URL / SUPABASE_KEY are injected via `balena env set` at deploy
+    # time. Never commit real values; secrets never live in the manifest.
     - SUPABASE_URL: ""
     - SUPABASE_KEY: ""
   defaultDeviceType: raspberrypi4-64
@@ -21,13 +32,214 @@ data:
     - raspberrypi3-64
     - fincm3
 version: 1.0.0
-# OpenBalena registry image sources for CPE components
-# These images must be pushed to the local registry (registry.loc.wallacearizona.us)
-# before the builder can use them for fleet releases
+
+# ----------------------------------------------------------------------------
+# Image sources (SHA-pinned)
+# ----------------------------------------------------------------------------
+# `ghcr.io/ultron-aquabutler/njspc:sha-1b90c02` is the immutable OCI index of
+# PR #1 (commit 1b90c02). Per-arch digests (verified 2026-08-26):
+#   amd64  sha256:0c75503b28851e93d126cbb8ff70a0d13e57d907432c3f7ff754a67badee7b56
+#   arm64  sha256:d8bc93d30aff49e10b9865ec6e987fbe91f6ccaa887706e314685a6b90dfc5b3
+#   arm/v7 sha256:3a494a9a1782a72c8631a7272cb1a3e155b22660844b26e3bf9f147b89086ee1
+# When the OpenBalena stack (t_6cae4233) is up, mirror once via skopeo copy
+# and point balena push at registry.loc.wallacearizona.us.
 docker:
   njspc:
-    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc:latest
+    image: ghcr.io/ultron-aquabutler/njspc:sha-1b90c02
   dashboard:
-    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:latest
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:pending-pin
   rem:
-    image: registry.loc.wallacearizona.us/ultron-aquabutler/relay-equipment-manager:latest
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/relay-equipment-manager:pending-pin
+  # aquabutlers-mqtt-bridge (VISION.md #1) — offline-resilient MQTT bridge.
+  # Image SHA is set after first PR merge; pinning tracks fleet reproducibility.
+  mqtt-bridge:
+    image: ghcr.io/ultron-aquabutler/aquabutlers-mqtt-bridge:sha-601483e
+
+# ----------------------------------------------------------------------------
+# poolController service — port of AQB-011 PR #1
+# ----------------------------------------------------------------------------
+# Mirrors the v2 services block from ultron-aquabutler/poolController PR #1
+# (merged commit 1b90c02, 2026-07-30). Per-customer overrides go through
+# balena device variables (NOT the manifest):
+#   POOL_RS485_PORT          RS-485 device node (default /dev/ttyUSB0)
+#   POOL_NET_CONNECT         "true" → ScreenLogic/Networkbridge, "false" → direct serial
+#   POOL_NET_HOST            ScreenLogic host (only when POOL_NET_CONNECT=true)
+#   POOL_NET_PORT            ScreenLogic port (default 9801)
+#   POOL_LATITUDE, POOL_LONGITUDE  site geolocation (decimal degrees)
+#   MQTT_BROKER_URL          override broker; defaults to in-fleet mqtt:1883
+#   BALENA_DEVICE_RS485_PATH non-standard /dev path when USB0/ACM0 don't fit
+services:
+  poolController:
+    # Reuse the prebuilt image. Drop the `image:` and add a `build:` block if
+    # a future variant needs a custom build context.
+    image: ghcr.io/ultron-aquabutler/njspc:sha-1b90c02
+    hostname: poolcontroller
+    user: node              # matches the node user in AquaButler-Control-njsPC Dockerfile
+    restart: always
+    ports:
+      - "4200:4200/tcp"     # web UI
+      - "4201:4201/tcp"     # HTTPS (optional)
+      - "39500:39500/tcp"   # SmartThings
+      - "39501:39501/tcp"   # Hubitat
+      - "3480:3480/tcp"     # Vera / UPnP discovery
+    volumes:
+      - "poolcontroller-data:/app/data"
+      - "poolcontroller-backups:/app/backups"
+      - "poolcontroller-logs:/app/logs"
+      - "poolcontroller-bindings:/app/web/bindings/custom"
+      - "poolcontroller-config:/app/config.json:rw"
+    devices:
+      - "/dev/ttyUSB0:/dev/ttyUSB0"   # FTDI / CH340 / CP2102 adapters
+      - "/dev/ttyACM0:/dev/ttyACM0"   # some RS-485 shields
+    environment:
+      - "POOL_RS485_PORT=/dev/ttyUSB0"
+      - "POOL_NET_CONNECT=false"
+      - "POOL_NET_HOST=raspberrypi"
+      - "POOL_NET_PORT=9801"
+      - "TZ=America/Phoenix"
+      - "NODE_ENV=production"
+    healthcheck:
+      interval: 60s
+      timeout: 8s
+      start_period: 90s
+      retries: 4
+      path: /
+      port: 4200
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=nodejs-poolController"
+      - "org.opencontainers.image.description=Bridge Pentair / compatible pool automation equipment to REST, WebSockets, MQTT, Influx, Rules. AquaButlers fleet member."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/poolController"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
+  # ----------------------------------------------------------------------
+  # relayEquipmentManager (REM) — companion service to poolController
+  # ----------------------------------------------------------------------
+  # Mirrors the standalone balena.yml at
+  # ultron-aquabutler/AquaButler-Control-REM/balena.yml (PR #1 on that
+  # repo, branch feat/aqb-013-balena-yml). Same fields, same device
+  # bindings, different image reference — this fleet pulls the multi-arch
+  # build from GHCR until OpenBalena mirrors it.
+  #
+  # REM is a HAT-stack relay/sensor controller. It does NOT use RS-485 —
+  # poolController owns /dev/ttyUSB* and /dev/ttyACM* for the Pentair
+  # serial bus. If a future REM variant needs RS-485 (e.g. MEGA-IND
+  # modbus), coordinate bus arbitration with poolController's `devices:`
+  # block before binding /dev/ttyUSB* here.
+  relayEquipmentManager:
+    image: ghcr.io/ultron-aquabutler/relay-equipment-manager:sha-4febffc
+    hostname: rem
+    user: node
+    restart: always
+    # Host ports sourced from defaultConfig.json -> web.servers.*:
+    #   8080  - HTTP UI / REST / Socket.IO
+    #   8081  - HTTPS (opt-in via web.servers.https.enabled)
+    #   1900  - SSDP / UPnP discovery (UDP)
+    ports:
+      - "8080:8080/tcp"
+      - "8081:8081/tcp"
+      - "1900:1900/udp"
+    volumes:
+      - "rem-data:/app/data"
+      - "rem-config:/app/config.json"
+      - "rem-logs:/app/logs"
+      - "rem-backups:/app/backups"
+    # Hardware device bindings — REM's GPIO / I2C / SPI / 1-Wire surface.
+    # RS-485 is intentionally absent; poolController owns the bus.
+    devices:
+      - "/dev/gpiomem:/dev/gpiomem"
+      - "/dev/gpiochip0:/dev/gpiochip0"
+      - "/dev/i2c-1:/dev/i2c-1"
+      - "/dev/spidev0.0:/dev/spidev0.0"
+      - "/dev/spidev0.1:/dev/spidev0.1"
+      - "/sys/bus/w1:/sys/bus/w1"
+    environment:
+      - "TZ=UTC"
+      - "NODE_ENV=production"
+      - "UDEV=1"
+      - "MQTT_BROKER_URL=mqtt://mqtt:1883"
+    # REM's Express server answers GET / with the dashboard HTML.
+    healthcheck:
+      interval: 60s
+      timeout: 8s
+      start_period: 60s
+      retries: 4
+      path: /
+      port: 8080
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=relay-equipment-manager"
+      - "org.opencontainers.image.description=Relay Equipment Manager — GPIO/I2C/SPI/1-Wire relay and sensor control. AquaButlers fleet member."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/AquaButler-Control-REM"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
+# ----------------------------------------------------------------------------
+# aquabutlers-mqtt-bridge service — offline-resilient MQTT bridge (VISION #1)
+# ----------------------------------------------------------------------------
+# Sibling of poolController/REM. Bridges the in-fleet Mosquitto (`mqtt:1883`)
+# to the central broker (`mqtt.aquabutlers.com:8883`). On outage, buffers
+# outbox to SQLite in /data/bridge.db and drains in insertion order on
+# reconnect. Critical commands (heater/pump/valve/emergency) are forwarded at
+# QoS 2 — exactly-once — so the central broker cannot silently drop them.
+#
+# Central-broker credentials (BRIDGE_CENTRAL_USER / BRIDGE_CENTRAL_PASS) are
+# injected via `balena env set` per device; never commit them here.
+#
+# Repo: https://github.com/ultron-aquabutler/aquabutlers-mqtt-bridge
+  mqtt-bridge:
+    image: ghcr.io/ultron-aquabutler/aquabutlers-mqtt-bridge:sha-601483e
+    hostname: mqtt-bridge
+    user: node
+    restart: always
+    # Pure network client — no host ports exposed.
+    volumes:
+      - "mqtt-bridge-data:/data"
+    environment:
+      - "TZ=UTC"
+      - "NODE_ENV=production"
+      - "BRIDGE_DB_PATH=/data/bridge.db"
+      - "BRIDGE_LOCAL_URL=mqtt://mqtt:1883"
+      # Central broker URL/credentials are device-env overrides.
+      - "BRIDGE_CENTRAL_URL=mqtts://mqtt.aquabutlers.com:8883"
+      - "BRIDGE_CENTRAL_USER="
+      - "BRIDGE_CENTRAL_PASS="
+      - "BRIDGE_FORWARD_FILTERS=aqb/+/+/telemetry/#,aqb/+/+/state/#,aqb/+/+/cmd/#"
+      - "BRIDGE_CRITICAL_FILTERS=aqb/+/+/cmd/heater/#,aqb/+/+/cmd/pump/#,aqb/+/+/cmd/valve/#,aqb/+/+/cmd/emergency/#"
+      - "BRIDGE_DEFAULT_QOS=0"
+      - "BRIDGE_BATCH_SIZE=100"
+      - "BRIDGE_DRAIN_INTERVAL_MS=1000"
+    # No HTTP port — the healthcheck asserts the SQLite outbox is mounted.
+    healthcheck:
+      interval: 60s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
+      test: ["CMD", "node", "-e", "require('fs').accessSync('/data/bridge.db',require('fs').constants.F_OK)"]
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=aquabutlers-mqtt-bridge"
+      - "org.opencontainers.image.description=Offline-resilient MQTT bridge for AquaButler CPE — SQLite outbox + QoS 2 for critical commands."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/aquabutlers-mqtt-bridge"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
+# ----------------------------------------------------------------------------
+# Named volumes — supervisor-managed persistent storage
+# ----------------------------------------------------------------------------
+volumes:
+  poolcontroller-data:
+  poolcontroller-backups:
+  poolcontroller-logs:
+  poolcontroller-bindings:
+  poolcontroller-config:
+  rem-data:
+  rem-config:
+  rem-logs:
+  rem-backups:
+  # mqtt-bridge SQLite outbox — survives Pi power loss / container restart.
+  mqtt-bridge-data:

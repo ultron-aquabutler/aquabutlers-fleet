@@ -6,6 +6,7 @@ networks:
 
 volumes:
   shared-config:
+  bridge-data:
 
 services:
   njspc:
@@ -70,6 +71,31 @@ services:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
       - shared-config:/mosquitto/data
     restart: unless-stopped
+
+  # Offline-resilient MQTT bridge for VISION #1. In local dev this needs a
+  # second broker reachable as `central:1883`; for an end-to-end test, run
+  # `docker run -d --name central -p 1884:1883 eclipse-mosquitto:2 -c /dev/null`
+  # alongside this compose stack and point BRIDGE_CENTRAL_URL at it.
+  mqtt-bridge:
+    build:
+      context: ../aquabutlers-mqtt-bridge
+      dockerfile: Dockerfile
+    networks:
+      - aquabutlers-net
+    volumes:
+      - bridge-data:/data
+    environment:
+      - BRIDGE_DB_PATH=/data/bridge.db
+      - BRIDGE_LOCAL_URL=mqtt://mqtt:1883
+      - BRIDGE_CENTRAL_URL=mqtt://central:1883
+      - BRIDGE_FORWARD_FILTERS=aqb/+/+/telemetry/#,aqb/+/+/state/#,aqb/+/+/cmd/#
+      - BRIDGE_CRITICAL_FILTERS=aqb/+/+/cmd/heater/#,aqb/+/+/cmd/pump/#,aqb/+/+/cmd/valve/#,aqb/+/+/cmd/emergency/#
+      - BRIDGE_DEFAULT_QOS=0
+      - BRIDGE_BATCH_SIZE=100
+      - BRIDGE_DRAIN_INTERVAL_MS=1000
+    restart: unless-stopped
+    depends_on:
+      - mqtt
 
   aqualinkd:
     # Uses Balena-ready Dockerfile (in root of AqualinkD repo)
