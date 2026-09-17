@@ -73,6 +73,12 @@ docker:
     image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:pending-pin
   rem:
     image: ghcr.io/ultron-aquabutler/relay-equipment-manager:sha-e9a735b
+  # aquabutlers-provisioner — first-boot provisioner (Phase A of t_03d484e8).
+  # Multi-arch OCI index tracked at the services.provisioner.image key below;
+  # `balena push` populates :latest post-push, after which the per-arch
+  # digests are captured into the sha tag.
+  provisioner:
+    image: ghcr.io/ultron-aquabutler/aquabutlers-provisioner:sha-pending-pin
   # aquabutlers-mqtt-bridge (VISION.md #1) — offline-resilient MQTT bridge.
   # Image SHA is set after first PR merge; pinning tracks fleet reproducibility.
   mqtt-bridge:
@@ -257,6 +263,67 @@ services:
       - "org.opencontainers.image.licenses=AGPL-3.0-only"
 
 # ----------------------------------------------------------------------------
+# provisioner service — first-boot customer-id + MQTT restore trigger
+# ----------------------------------------------------------------------------
+# Phase A of the DR auto-restore feature (parent t_03d484e8). On a freshly
+# provisioned Pi:
+#
+#   1. Reads /mnt/data/customer_id.
+#   2. If missing: serves a captive portal on :80 (calls the balenaOS host's
+#      `aquabutlers-portal.target` systemd unit for hostapd/dnsmasq). On form
+#      submit: writes the ID, reboots.
+#   3. If present: connects to the central broker using MQTT_USER_<ID> /
+#      MQTT_PASS_<ID>, subscribes pool/+/config/# (retained), publishes
+#      pool/<id>/cmd/restore once, forwards retained config messages to
+#      /mnt/data/njspc-config/.
+#
+# Wire protocol locked by orchestrator t_03d484e8. Repo:
+# https://github.com/ultron-aquabutler/aquabutlers-provisioner
+  provisioner:
+    # Pin tracked in fleet PR — capture per-arch digests after first
+    # `balena push` and update the sha tag. See AquaButler/OpenBalena_Fleet/
+    # Balena-YML-Pinning for the procedure.
+    image: ghcr.io/ultron-aquabutler/aquabutlers-provisioner:sha-pending-pin
+    hostname: provisioner
+    user: root
+    restart: always
+    # Host network so the captive portal HTTP server on :80 is reachable as
+    # the DNS-hijack target on wlan0. Privileged so it can systemctl the
+    # balenaOS host's aquabutlers-portal.target unit.
+    network_mode: host
+    privileged: true
+    volumes:
+      # Supervisor-managed persistent volume for /mnt/data. Survives re-flash.
+      - "provisioner-data:/mnt/data"
+    environment:
+      - "TZ=UTC"
+      - "NODE_ENV=production"
+      # Central broker URL — overridden per device via `balena env set`.
+      - "MQTT_BROKER_URL=mqtt://mqtt.aquabutlers.com:1883"
+      # Per-customer creds are set at fleet registration time:
+      #   MQTT_USER_<CUSTOMER_ID_UPPER>=<user>
+      #   MQTT_PASS_<CUSTOMER_ID_UPPER>=<pass>
+      # where CUSTOMER_ID_UPPER = customer_id.toUpperCase().replace(/-/g, '_')
+      # See Provisioning_First_Boot.md for the registration flow.
+    # Healthcheck: probe the captive portal HTTP server (when in portal mode)
+    # OR confirm /mnt/data/customer_id exists (restore mode). The provisioner
+    # also signals readiness via systemctl aquabutlers-provisioner.ready.
+    healthcheck:
+      interval: 60s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
+      test: ["CMD", "sh", "-c", "test -f /mnt/data/customer_id || nc -z 127.0.0.1 80"]
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=aquabutlers-provisioner"
+      - "org.opencontainers.image.description=First-boot provisioner for AquaButler CPE — captive portal + MQTT restore trigger."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/aquabutlers-provisioner"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
+# ----------------------------------------------------------------------------
 # Named volumes — supervisor-managed persistent storage
 # ----------------------------------------------------------------------------
 volumes:
@@ -271,3 +338,7 @@ volumes:
   rem-backups:
   # mqtt-bridge SQLite outbox — survives Pi power loss / container restart.
   mqtt-bridge-data:
+  # Provisioner persistent storage — /mnt/data inside the container.
+  # Survives balenaOS re-flash so customer_id + njsPC config persist across
+  # customer-device swaps.
+  provisioner-data:
