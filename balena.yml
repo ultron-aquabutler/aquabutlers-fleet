@@ -59,30 +59,35 @@ version: 1.0.0
 # The local-registry's ultron-aquabutler/relay-equipment-manager:latest carries
 # the SAME amd64 slice digest. Pinning the GHCR tag is canonical.
 #
-# `njspc-dash:sha-0640f88` — DASHBOARD. Pinned post-fork-sync build (2026-09-23,
-# kanban t_105dc755). Fork HEAD `0640f88` on `ultron-aquabutler/Controller-dashPanel`
-# branch `fork-sync/v10.0.1-sync` brings upstream v10.0.1+1 (60 commits from
-# merge-base 8cee958) onto the fork with NO in-tree patches.
+# `njspc-dash:sha-6551aa3` — DASHBOARD. Pinned post-fork-rebase-merge (2026-09-23,
+# kanban t_643b57f8). Fork HEAD `6551aa3` on `ultron-aquabutler/Controller-dashPanel`
+# branch `master` is the merge of `fork-sync/v10.0.1-sync` onto fork `master`,
+# bringing the fork up to upstream HEAD `ab8060c` (v10.0.1, 2026-09-09) with
+# NO in-tree patches. Merge-base `ab8060c` is upstream HEAD itself; 10
+# fork-local commits sit on top (multi-arch dist, GHCR workflow, AqualinkD
+# theme, balena.yml, aqualinkd-dark theme).
 #
 # Source-bundle integrity hash (dist/app.js) — verified against the same hash
 # produced by a clean `npm install && npm run build` of upstream tag
 # `v10.0.1` (92d62758), confirming the fork-sync build is faithful to upstream:
 #   sha256:b73147ceb85db5266e895022499a5b8c62557c1c25de7c12332794a512e7eac0
 #
-# OCI image digest for this tag is pending the next GHCR or OpenBalena push.
+# OCI image digest for amd64 (built locally with build-njspc-dash.sh from
+# fork HEAD 6551aa3, pushed to local registry 2026-09-23):
+#   amd64  sha256:8b5602df1a33b150d1f5b9ed44d552d3203f255b07dd0560a6512ca1696a285c
 # The pre-sync local-registry image (digest 7d512a9ac0a9, built 2026-09-17)
 # was an OUT-OF-TREE patch and is now stale — fleet consumers must NOT
-# resolve to that image. Re-run `balena push aquabutlers-fleet` or trigger
-# the GHCR workflow on master to produce the matching OCI digest and tighten
-# the pin from a SHA tag to a sha256:… digest. Kanban child task tracks.
+# resolve to that image. arm64 + arm/v7 builds pending the next GHCR workflow
+# run on master (ultron-aquabutler/Controller-dashPanel master at 6551aa3).
 docker:
   njspc:
     image: ghcr.io/ultron-aquabutler/njspc:sha-1b90c02
   dashboard:
-    # SHA-pinned to fork-sync HEAD; replaces :pending-pin. Build verification
-    # gate: source bundle hash b73147ceb... matches upstream v10.0.1 tag build,
-    # no in-tree patches applied.
-    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:sha-0640f88
+    # SHA-pinned to fork master HEAD post-rebase merge; replaces :sha-0640f88.
+    # Build verification gate: source bundle hash b73147ceb... matches upstream
+    # v10.0.1 tag build, no in-tree patches applied. amd64 OCI digest
+    # 8b5602df1a33... captured 2026-09-23 via build-njspc-dash.sh.
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:sha-6551aa3
   rem:
     image: ghcr.io/ultron-aquabutler/relay-equipment-manager:sha-e9a735b
   # aquabutlers-provisioner — first-boot provisioner (Phase A of t_03d484e8).
