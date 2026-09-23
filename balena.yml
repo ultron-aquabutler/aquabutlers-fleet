@@ -59,18 +59,30 @@ version: 1.0.0
 # The local-registry's ultron-aquabutler/relay-equipment-manager:latest carries
 # the SAME amd64 slice digest. Pinning the GHCR tag is canonical.
 #
-# `njspc-dash:pending-pin` — DASHBOARD. NOT yet pinned. The local-registry has
-# only an amd64 OCI manifest at :latest (built 2026-09-17 from
-# brydenver2/AquaButler-Control-dashPanel, no GHCR mirror exists for this
-# image). A real multi-arch pin requires running `balena push aquabutlers-fleet`
-# once — the OpenBalena builder does QEMU cross-compile for ARM Pi targets and
-# OVERWRITES :latest with a multi-arch index. After that push, capture the
-# post-push per-arch digests and update this pin. Kanban t_f0511495 tracks.
+# `njspc-dash:sha-0640f88` — DASHBOARD. Pinned post-fork-sync build (2026-09-23,
+# kanban t_105dc755). Fork HEAD `0640f88` on `ultron-aquabutler/Controller-dashPanel`
+# branch `fork-sync/v10.0.1-sync` brings upstream v10.0.1+1 (60 commits from
+# merge-base 8cee958) onto the fork with NO in-tree patches.
+#
+# Source-bundle integrity hash (dist/app.js) — verified against the same hash
+# produced by a clean `npm install && npm run build` of upstream tag
+# `v10.0.1` (92d62758), confirming the fork-sync build is faithful to upstream:
+#   sha256:b73147ceb85db5266e895022499a5b8c62557c1c25de7c12332794a512e7eac0
+#
+# OCI image digest for this tag is pending the next GHCR or OpenBalena push.
+# The pre-sync local-registry image (digest 7d512a9ac0a9, built 2026-09-17)
+# was an OUT-OF-TREE patch and is now stale — fleet consumers must NOT
+# resolve to that image. Re-run `balena push aquabutlers-fleet` or trigger
+# the GHCR workflow on master to produce the matching OCI digest and tighten
+# the pin from a SHA tag to a sha256:… digest. Kanban child task tracks.
 docker:
   njspc:
     image: ghcr.io/ultron-aquabutler/njspc:sha-1b90c02
   dashboard:
-    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:pending-pin
+    # SHA-pinned to fork-sync HEAD; replaces :pending-pin. Build verification
+    # gate: source bundle hash b73147ceb... matches upstream v10.0.1 tag build,
+    # no in-tree patches applied.
+    image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:sha-0640f88
   rem:
     image: ghcr.io/ultron-aquabutler/relay-equipment-manager:sha-e9a735b
   # aquabutlers-provisioner — first-boot provisioner (Phase A of t_03d484e8).
