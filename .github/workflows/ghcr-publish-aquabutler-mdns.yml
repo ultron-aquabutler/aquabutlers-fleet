@@ -28,6 +28,11 @@ on:
     paths:
       - 'aquabutler-mdns/**'
   workflow_dispatch:
+    inputs:
+      publish_latest:
+        description: "Also publish the `latest` tag (the tag balena.yml pins)"
+        type: boolean
+        default: true
 
 jobs:
   build-and-push:
@@ -52,7 +57,19 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            # `latest` is the tag balena.yml pins, so it MUST exist for
+            # a device to be able to pull the image. It is published
+            # from a push to `main` or from an explicit workflow_dispatch
+            # (which defaults to publishing it).
+            #
+            # It is deliberately NOT tied to `{{is_default_branch}}`:
+            # this repo's default branch is
+            # `feat/aqb-011-port-poolcontroller-to-fleet`, not `main`,
+            # so the `is_default_branch` gate never fires and `latest`
+            # was silently never published — the image existed on GHCR
+            # under the branch and sha tags only, and balena.yml's
+            # `image: ...:latest` would have failed to pull.
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.publish_latest || github.ref == 'refs/heads/main' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
