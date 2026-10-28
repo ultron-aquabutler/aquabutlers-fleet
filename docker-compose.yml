@@ -118,3 +118,27 @@ services:
     restart: unless-stopped
     depends_on:
       - mqtt
+
+  # The device's LAN-local mDNS advertiser. Publishes `_aquabutler._tcp`
+  # on the customer's residential LAN (policy §2 — see
+  # docs/Ethernet-deployment-policy.md in ultron-aquabutler/AquaButler-Server).
+  #
+  # `network_mode: host` is REQUIRED — mDNS is link-local multicast and
+  # a bridge-networked responder is invisible on the customer's segment.
+  #
+  # For local development this is most useful run on its own:
+  #   docker compose up aquabutler-mdns
+  # then, from a laptop on the same segment:
+  #   avahi-browse -rt _aquabutler._tcp
+  aquabutler-mdns:
+    build:
+      context: ./aquabutler-mdns
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      # Override to pin the advertised unit ID; empty means "use the
+      # balena device UUID", which does not exist outside balenaOS.
+      - "AQUABUTLER_UNIT_ID=dev-unit"
+      - "AQUABUTLER_SW_VERSION=0.1.0"
+      - "AQUABUTLER_POLL_INTERVAL=15"
+    restart: unless-stopped
