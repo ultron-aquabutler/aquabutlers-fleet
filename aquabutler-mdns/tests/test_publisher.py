@@ -213,3 +213,107 @@ def test_run_forever_stops_when_told():
 
     publisher.run_forever(stop=stop)
     assert calls["n"] > 2
+
+
+# ---------------------------------------------------------------------
+# The route query is rate-limited across publish cycles
+# ---------------------------------------------------------------------
+
+
+def test_the_publisher_holds_one_transport_source_across_publishes(monkeypatch):
+    """The route query must not run once per publish cycle.
+
+    The publisher holds a single `TransportSource` for the life of the
+    process; that is what makes the rate limit effective. A fresh
+    source per cycle would defeat the cache and put the container back
+    to one `fork`/`exec` per poll — the thing the sibling card
+    `t_1ff3d0bb` found and fixed on the display side.
+    """
+    monkeypatch.delenv("AQUABUTLER_TRANSPORT", raising=False)
+
+    import aquabutler_mdns.netinfo as netinfo_module
+    from aquabutler_mdns.transport import Transport, TransportReading, TransportSource
+
+    monkeypatch.setattr(
+        netinfo_module,
+        "list_interface_addresses",
+        lambda runner=None, timeout=2.0: [],
+    )
+
+    queries = {"n": 0}
+
+    def query():
+        queries["n"] += 1
+        return TransportReading(
+            transport=Transport.ETH, source="route", interface="eth0"
+        )
+
+    publisher = Publisher(
+        config=PublisherConfig(service_file=Path("/tmp/aquabutler.service")),
+        env={},
+        transport_source=TransportSource(query=query),
+    )
+
+    for _ in range(20):
+        publisher.resolve()
+
+    assert queries["n"] == 1, "the route query ran once per publish cycle"
+
+
+def test_the_refresh_interval_reaches_the_transport_source():
+    """`PublisherConfig.transport_refresh_interval_sec` is honoured.
+
+    The config value is what the publisher passes to the source *it*
+    builds. An explicitly injected source keeps its own interval —
+    injection is a test seam, and it should win.
+    """
+    import aquabutler_mdns.netinfo as netinfo_module
+    from aquabutler_mdns.transport import Transport, TransportReading, TransportSource
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delenv("AQUABUTLER_TRANSPORT", raising=False)
+    monkeypatch.setattr(
+        netinfo_module,
+        "list_interface_addresses",
+        lambda runner=None, timeout=2.0: [],
+    )
+
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = FakeClock()
+    queries = {"n": 0}
+
+    def query():
+        queries["n"] += 1
+        return TransportReading(
+            transport=Transport.ETH, source="route", interface="eth0"
+        )
+
+    # The publisher builds its own source from the config — this is
+    # the production path (the entrypoint passes the interval on the
+    # command line, which lands in `PublisherConfig`).
+    publisher = Publisher(
+        config=PublisherConfig(
+            service_file=Path("/tmp/aquabutler.service"),
+            transport_refresh_interval_sec=30.0,
+        ),
+        env={},
+    )
+    # Swap in the query and clock the publisher will use.
+    publisher._transport_source._query = query
+    publisher._transport_source._clock = clock
+
+    publisher.resolve()
+    clock.now += 10.0
+    publisher.resolve()
+    assert queries["n"] == 1, "the query ran before the refresh interval elapsed"
+
+    clock.now += 25.0
+    publisher.resolve()
+    assert queries["n"] == 2
+    monkeypatch.undo()

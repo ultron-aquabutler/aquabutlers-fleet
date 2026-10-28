@@ -26,6 +26,11 @@ set -eu
 SERVICE_FILE="${AQUABUTLER_SERVICE_FILE:-/etc/avahi/services/aquabutler.service}"
 CUSTOMER_ID_PATH="${AQUABUTLER_CUSTOMER_ID_PATH:-/mnt/data/customer_id}"
 POLL_INTERVAL="${AQUABUTLER_POLL_INTERVAL:-15}"
+# Minimum seconds between two route queries. The route query is a
+# `fork`/`exec` of `ip`, so it is rate-limited rather than run per
+# poll cycle. 2 s matches the rotary display's default, so both
+# containers resolve the transport on the same cadence.
+TRANSPORT_REFRESH="${AQUABUTLER_TRANSPORT_REFRESH_SEC:-2}"
 DBUS_SOCKET="${DBUS_SYSTEM_BUS_SOCKET:-/var/run/dbus/system_bus_socket}"
 
 # -------------------------------------------------------------------------
@@ -99,7 +104,7 @@ echo "aquabutler-mdns: avahi-daemon is up"
 # -------------------------------------------------------------------------
 # 3. the publisher
 # -------------------------------------------------------------------------
-PUBLISHER_ARGS="--service-file $SERVICE_FILE --customer-id-path $CUSTOMER_ID_PATH --poll-interval $POLL_INTERVAL"
+PUBLISHER_ARGS="--service-file $SERVICE_FILE --customer-id-path $CUSTOMER_ID_PATH --poll-interval $POLL_INTERVAL --transport-refresh-interval $TRANSPORT_REFRESH"
 
 # `--once` (forwarded from the container's command line) publishes a
 # single snapshot and exits — the mode used by the smoke test and by a

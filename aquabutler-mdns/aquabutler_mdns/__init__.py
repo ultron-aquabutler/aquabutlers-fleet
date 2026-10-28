@@ -37,8 +37,12 @@ from .identity import (
 from .netinfo import current_lan_ip, list_interface_addresses
 from .publisher import Publisher, PublisherConfig, main
 from .transport import (
+    DEFAULT_REFRESH_INTERVAL_SEC,
     MDNS_TRANSPORT_VALUES,
+    STATUS_LINK_LEAF,
     Transport,
+    TransportSource,
+    TransportState,
     current_transport,
     current_transport_reading,
     mdns_transport_value,
@@ -51,14 +55,18 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Advertisement",
+    "DEFAULT_REFRESH_INTERVAL_SEC",
     "EXPECTED_TXT_KEYS",
     "MDNS_TRANSPORT_VALUES",
     "Publisher",
     "PublisherConfig",
     "SERVICE_PORT",
     "SERVICE_TYPE",
+    "STATUS_LINK_LEAF",
     "ServiceDefinition",
     "Transport",
+    "TransportSource",
+    "TransportState",
     "__version__",
     "current_lan_ip",
     "current_transport",

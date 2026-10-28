@@ -40,6 +40,7 @@ from .identity import (
     short_unit_id,
 )
 from .netinfo import current_lan_ip
+from .transport import DEFAULT_REFRESH_INTERVAL_SEC, TransportSource
 
 
 log = logging.getLogger(__name__)
@@ -62,6 +63,11 @@ class PublisherConfig:
     poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC
     # Avahi's host name for the unit: `<unit_id>.local`.
     domain: str = "local"
+    # Minimum interval between two route queries, in seconds. The
+    # publisher holds one `TransportSource` for the life of the
+    # process, so the route query is rate-limited here rather than
+    # running once per poll cycle.
+    transport_refresh_interval_sec: float = DEFAULT_REFRESH_INTERVAL_SEC
 
 
 class Publisher:
@@ -76,6 +82,7 @@ class Publisher:
         reload_avahi: Callable[[], bool] | None = None,
         set_host_name: Callable[[str], bool] | None = None,
         current_host_name: Callable[[], str] | None = None,
+        transport_source: TransportSource | None = None,
     ) -> None:
         self.config = config or PublisherConfig()
         self._env = env
@@ -86,6 +93,14 @@ class Publisher:
         self._current_host_name = current_host_name or self._default_current_host_name
         self._last_rendered: str | None = None
         self._host_name_set: str | None = None
+        # The host name the daemon actually owns, as last observed.
+        self._last_host_name: str | None = None
+        # One source for the life of the process — this is what
+        # rate-limits the route query. A fresh source per poll would
+        # defeat the cache entirely.
+        self._transport_source = transport_source or TransportSource(
+            refresh_interval_sec=self.config.transport_refresh_interval_sec
+        )
 
     # -- default side-effect implementations (injectable for tests) --
 
@@ -236,7 +251,9 @@ class Publisher:
         unit_id = resolve_unit_id(env)
         customer_id = read_customer_id(self.config.customer_id_path)
         sw_version = resolve_sw_version(env)
-        transport_txt, transport, interface = resolve_transport(env)
+        transport_txt, transport, interface = resolve_transport(
+            env, source=self._transport_source
+        )
 
         ip = current_lan_ip(active_iface=interface or None)
 
@@ -264,15 +281,40 @@ class Publisher:
     # -- the publish step --
 
     def publish_once(self) -> bool:
-        """Resolve, render, write and reload. Returns True on change."""
+        """Resolve, render, write and reload. Returns True on change.
+
+        The host name and the service file have to agree with what
+        the daemon actually holds, and the daemon only settles on a
+        name *after* a reload. So the order matters:
+
+        1. resolve the payload;
+        2. claim the requested host name (once — the daemon keeps it
+           across service-file reloads, unless it was contended);
+        3. write the service file and reload the daemon;
+        4. read back the name the daemon *actually* owns and, if it
+           differs from what was written, correct the file.
+
+        Step 4 is not optional. `avahi-daemon --reload` re-registers
+        the host name as well as the services, so on a contended
+        segment the daemon silently moves to a suffixed variant
+        (`<unit_id>-8` → `<unit_id>-11` → …) on every reload. The
+        name written into the file before the reload is therefore
+        already stale by the time the reload returns. Advertising it
+        would point the SRV record at a name the daemon does not own,
+        and `avahi-resolve -n <unit_id>.local` would time out.
+
+        The corrected file is written without a second reload: avahi
+        reads the `<host-name>` when it loads the service, so the
+        name that matters is the one in the file at reload time. The
+        correction is verified against the daemon on the next cycle.
+        """
         advertisement = self.resolve()
         requested_host_name = self.host_name(advertisement)
 
         # The daemon must own the unit's host name before the service
         # can be resolved: avahi publishes the SRV record pointing at
         # `<unit_id>.local`, and that name only resolves if the daemon
-        # has claimed it. Set it once — the daemon keeps it across
-        # service-file reloads.
+        # has claimed it.
         if requested_host_name != self._host_name_set:
             if self._set_host_name(requested_host_name):
                 self._host_name_set = requested_host_name
@@ -301,21 +343,70 @@ class Publisher:
         self._write_file(self.config.service_file, rendered)
         self._last_rendered = rendered
 
-        if self._reload_avahi():
-            log.info(
-                "published %s at %s (transport=%s ip=%s)",
-                host_name,
-                self.config.service_file,
-                advertisement.transport or "?",
-                advertisement.ip or "?",
-            )
-        else:
+        if not self._reload_avahi():
             log.warning(
                 "wrote %s but avahi reload failed; the running responder "
                 "still advertises the previous payload",
                 self.config.service_file,
             )
+            return True
+
+        # The reload may have moved the daemon to a different host
+        # name (a contended segment) or back to the requested one.
+        # Reconcile the file with what the daemon now owns.
+        self._reconcile_host_name(advertisement, rendered)
+
+        log.info(
+            "published %s at %s (transport=%s ip=%s)",
+            self._last_host_name or host_name,
+            self.config.service_file,
+            advertisement.transport or "?",
+            advertisement.ip or "?",
+        )
         return True
+
+    def _reconcile_host_name(self, advertisement: Advertisement, rendered: str) -> None:
+        """Correct the service file if the daemon owns a different name.
+
+        After a reload the daemon may have settled on a different host
+        name than the one written into the file — on a contended
+        segment it takes a suffixed variant, and it re-registers the
+        name on every reload, so it can move again.
+
+        When the file and the daemon disagree, the daemon wins: the
+        SRV record must point at a name that resolves. The corrected
+        file is written but NOT reloaded — avahi has already loaded
+        the service with the previous `<host-name>`, and the next
+        payload change reloads it with the corrected one. Re-reloading
+        here would move the daemon's name again and start the drift
+        over.
+        """
+        requested = self.host_name(advertisement)
+        actual = self._current_host_name()
+        if not actual:
+            log.warning(
+                "could not confirm the avahi host name; leaving %s as advertised",
+                requested,
+            )
+            return
+
+        self._last_host_name = actual
+
+        if actual in rendered:
+            # The file already points at the name the daemon owns.
+            return
+
+        log.warning(
+            "the avahi daemon owns %s but the service file pointed at a "
+            "different name; correcting the file so the SRV record "
+            "resolves. `avahi-resolve -n %s` will not resolve — another "
+            "device on the LAN is using the unit's name.",
+            actual,
+            requested,
+        )
+        corrected = render_service_file(advertisement, host_name=actual)
+        self._write_file(self.config.service_file, corrected)
+        self._last_rendered = corrected
 
     def _effective_host_name(self, requested: str) -> str:
         """The host name to advertise — the one the daemon actually owns.
@@ -398,6 +489,15 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds between payload re-resolutions",
     )
     parser.add_argument(
+        "--transport-refresh-interval",
+        type=float,
+        default=DEFAULT_REFRESH_INTERVAL_SEC,
+        help=(
+            "minimum seconds between two route queries; the route query "
+            "is a fork/exec of `ip`, so it is rate-limited"
+        ),
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="resolve and publish a single time, then exit",
@@ -413,6 +513,7 @@ def main(argv: list[str] | None = None) -> int:
         service_file=Path(args.service_file),
         customer_id_path=args.customer_id_path,
         poll_interval_sec=args.poll_interval,
+        transport_refresh_interval_sec=args.transport_refresh_interval,
     )
     publisher = Publisher(config=config)
 

@@ -165,6 +165,10 @@ def test_publisher_advertises_the_active_interface_address(monkeypatch, tmp_path
     lookup. Before the fix the publisher passed `None` for the active
     interface, so the unit advertised the wired address even while
     the route said WiFi was active.
+
+    The transport is injected as a `TransportSource` — the same
+    object the publisher holds in production — so the test drives the
+    real resolution path rather than a stand-in for it.
     """
     route_output = "1.1.1.1 dev wlan0 src 10.0.0.5 uid 0"
     addr_output = TWO_IFACE_ADDR_SHOW
@@ -176,15 +180,10 @@ def test_publisher_advertises_the_active_interface_address(monkeypatch, tmp_path
     monkeypatch.setenv("AQUABUTLER_UNIT_ID", "aqb0007abcd")
     monkeypatch.setenv("AQUABUTLER_SW_VERSION", "1.2.3")
 
-    import aquabutler_mdns.identity as identity_module
     import aquabutler_mdns.netinfo as netinfo_module
+    from aquabutler_mdns.transport import TransportSource
 
-    # Patch the two subprocess seams the publisher uses.
-    monkeypatch.setattr(
-        identity_module,
-        "current_transport_reading",
-        lambda *a, **k: query_active_transport(runner=fake_route_runner),
-    )
+    # Patch the subprocess seams the publisher uses.
     monkeypatch.setattr(
         netinfo_module,
         "list_interface_addresses",
@@ -194,6 +193,9 @@ def test_publisher_advertises_the_active_interface_address(monkeypatch, tmp_path
     publisher = Publisher(
         config=PublisherConfig(service_file=tmp_path / "aquabutler.service"),
         env={},
+        transport_source=TransportSource(
+            query=lambda: query_active_transport(runner=fake_route_runner),
+        ),
     )
     advertisement = publisher.resolve()
 

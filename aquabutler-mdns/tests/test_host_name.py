@@ -195,8 +195,135 @@ def test_the_name_is_claimed_once_and_verified_every_cycle(tmp_path):
 
 
 def test_the_publisher_rechecks_the_name_after_a_restart(tmp_path):
-    """A changed daemon host name re-renders the service file."""
-    names = iter(["aqb0007abcd.local", "aqb0007abcd.local", "thor.local"])
+    """A changed daemon host name re-renders the service file.
+
+    The daemon's name is read twice per cycle — once before the
+    reload (to decide what to write) and once after (to reconcile
+    what the reload actually left the daemon owning) — so the
+    sequence below is two names per cycle.
+    """
+    names = iter(
+        [
+            "aqb0007abcd.local",   # cycle 1, before the reload
+            "aqb0007abcd.local",   # cycle 1, after the reload
+            "thor.local",          # cycle 2, before the reload
+            "thor.local",          # cycle 2, after the reload
+        ]
+    )
+    publisher, written = make_publisher(
+        tmp_path, current_host_name=lambda: next(names)
+    )
+
+    publisher.publish_once()
+    publisher.publish_once()
+
+    # The second cycle saw a different daemon name, so the file was
+    # rewritten with the new one.
+    assert len(written) == 2
+    assert parse_service_file(written[-1][1]).host_name == "thor.local"
+
+
+# ---------------------------------------------------------------------
+# The reload moves the daemon's name — reconcile AFTER the reload
+# ---------------------------------------------------------------------
+
+
+def test_the_file_is_corrected_when_the_reload_moves_the_daemon_name(tmp_path):
+    """`avahi-daemon --reload` re-registers the host name.
+
+    On a contended segment the daemon therefore moves to a suffixed
+    variant on every reload. The name written into the file *before*
+    the reload is stale by the time the reload returns, so the file
+    must be corrected afterwards — otherwise the SRV record points at
+    a name the daemon does not own and `avahi-resolve` times out.
+    """
+    # Before the reload the daemon owns the requested name; after the
+    # reload it has been pushed to a suffixed variant.
+    names = iter(["aqb0007abcd.local", "aqb0007abcd-11.local"])
+    publisher, written = make_publisher(
+        tmp_path, current_host_name=lambda: next(names)
+    )
+
+    publisher.publish_once()
+
+    # The last write must carry the name the daemon actually owns.
+    parsed = parse_service_file(written[-1][1])
+    assert parsed.host_name == "aqb0007abcd-11.local"
+
+
+def test_the_correction_is_logged_as_a_warning(tmp_path, caplog):
+    names = iter(["aqb0007abcd.local", "aqb0007abcd-11.local"])
+    publisher, _ = make_publisher(tmp_path, current_host_name=lambda: next(names))
+
+    with caplog.at_level("WARNING"):
+        publisher.publish_once()
+
+    assert any("owns aqb0007abcd-11.local" in r.message for r in caplog.records)
+
+
+def test_no_correction_is_made_when_the_daemon_keeps_the_name(tmp_path):
+    """The common case — the daemon holds the requested name — writes once."""
+    publisher, written = make_publisher(
+        tmp_path, current_host_name=lambda: "aqb0007abcd.local"
+    )
+
+    publisher.publish_once()
+
+    assert len(written) == 1
+    assert parse_service_file(written[0][1]).host_name == "aqb0007abcd.local"
+
+
+def test_the_correction_does_not_trigger_a_second_reload(tmp_path):
+    """Re-reloading would move the daemon's name again — and restart the drift.
+
+    The corrected file is written but not reloaded: avahi has already
+    loaded the service, and the next payload change reloads it with
+    the corrected `<host-name>`.
+    """
+    reloads = {"n": 0}
+
+    def reload_avahi():
+        reloads["n"] += 1
+        return True
+
+    names = iter(["aqb0007abcd.local", "aqb0007abcd-11.local"])
+    written: list[tuple[str, str]] = []
+
+    publisher = Publisher(
+        config=PublisherConfig(service_file=tmp_path / "aquabutler.service"),
+        resolve_payload=lambda: Advertisement(
+            unit_id="aqb0007abcd",
+            customer_id="acme-pool-01",
+            sw_version="1.2.3",
+            transport="eth",
+            ip="192.168.1.42",
+        ),
+        write_file=lambda path, content: written.append((str(path), content)),
+        reload_avahi=reload_avahi,
+        set_host_name=lambda name: True,
+        current_host_name=lambda: next(names),
+    )
+
+    publisher.publish_once()
+
+    assert reloads["n"] == 1, "the correction triggered a second reload"
+    assert len(written) == 2, "the file was not corrected"
+
+
+def test_the_reconciled_name_is_stable_across_cycles(tmp_path):
+    """Once the daemon settles on a name, the file stops being rewritten.
+
+    A file that is rewritten on every cycle causes an avahi reload on
+    every cycle, which is exactly what churns the responder.
+    """
+    names = iter(
+        [
+            "aqb0007abcd.local",   # read before the reload
+            "aqb0007abcd-11.local",  # read after the reload — moved
+            "aqb0007abcd-11.local",  # before the reload, cycle 2
+            "aqb0007abcd-11.local",  # after the reload, cycle 2
+        ]
+    )
     publisher, written = make_publisher(
         tmp_path, current_host_name=lambda: next(names)
     )
@@ -205,10 +332,10 @@ def test_the_publisher_rechecks_the_name_after_a_restart(tmp_path):
     publisher.publish_once()
     publisher.publish_once()
 
-    # The third cycle saw a different daemon name, so the file was
-    # rewritten with the new one.
+    # Cycle 1: initial write + correction. Cycles 2 and 3: the
+    # rendered payload is unchanged, so nothing is written.
     assert len(written) == 2
-    assert parse_service_file(written[-1][1]).host_name == "thor.local"
+    assert parse_service_file(written[-1][1]).host_name == "aqb0007abcd-11.local"
 
 
 # ---------------------------------------------------------------------

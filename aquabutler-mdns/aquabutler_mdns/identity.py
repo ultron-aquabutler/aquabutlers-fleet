@@ -28,6 +28,7 @@ from typing import Mapping
 
 from .transport import (
     Transport,
+    TransportSource,
     current_transport_reading,
     mdns_transport_value,
     transport_env_override,
@@ -134,6 +135,7 @@ def resolve_sw_version(env: Mapping[str, str] | None = None) -> str:
 
 def resolve_transport(
     env: Mapping[str, str] | None = None,
+    source: TransportSource | None = None,
 ) -> tuple[str, Transport, str]:
     """Resolve the active transport, its mDNS TXT form, and the interface.
 
@@ -150,11 +152,23 @@ def resolve_transport(
     Precedence: the `AQUABUTLER_TRANSPORT` operator override, then the
     local route query. Both come from the shared transport source, so
     this agrees with the rotary display.
+
+    When a `source` is supplied, the resolution goes through it — and
+    the source is what rate-limits the route query. The publisher
+    holds one source for the life of the process, so the route query
+    runs at most once per `refresh_interval_sec` no matter how often
+    the payload is re-resolved. Without a source this function falls
+    back to a single direct query, which is what the unit tests and
+    one-shot callers want.
     """
     e = os.environ if env is None else env
     override = transport_env_override()
     if override is not None and override.is_known:
         return mdns_transport_value(override), override, ""
+
+    if source is not None:
+        state = source.state
+        return mdns_transport_value(state.transport), state.transport, state.interface
 
     reading = current_transport_reading()
     return mdns_transport_value(reading.transport), reading.transport, reading.interface

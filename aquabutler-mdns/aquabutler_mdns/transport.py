@@ -60,8 +60,10 @@ import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Callable
 
 
 log = logging.getLogger(__name__)
@@ -335,9 +337,201 @@ def mdns_transport_value(transport: Transport | str | None) -> str:
     return MDNS_TRANSPORT_VALUES.get(transport, "")
 
 
+# Default minimum interval between two route queries.
+#
+# The route query is a `fork`/`exec` of `ip`. The rotary display
+# renders at 30 Hz, so running it per-frame costs 30 subprocess
+# spawns per second — on the CM4 (Cortex-A72 @ 1.5 GHz) that is a
+# large fraction of the 33.3 ms frame budget. The same reasoning
+# applies here: the transport only changes on a network reconnect
+# (the "last-connected wins" policy), so sub-second resolution buys
+# nothing a technician could perceive while the cost of every
+# spawn is real.
+#
+# 2 seconds is the same default the display uses, so the two
+# containers resolve the transport on the same cadence and cannot
+# disagree about which one is stale.
+DEFAULT_REFRESH_INTERVAL_SEC = 2.0
+
+# The MQTT status leaf that carries the transport. This is a *status*
+# topic under the existing `pool/<customer_id>/#` namespace — it does
+# not add, rename, or re-key any topic (the topic schema is locked;
+# see `docs/Ethernet-deployment-policy.md`).
+STATUS_LINK_LEAF = "link"
+
+# Default staleness window for an MQTT-sourced transport value.
+DEFAULT_STALE_AFTER_SEC = 300.0
+
+
+@dataclass
+class TransportState:
+    """A snapshot of what we believe the active transport is.
+
+    `interface` carries the name of the interface the reading came
+    from (`eth0`, `wlan0`). The mDNS container needs it to advertise
+    the address of the interface actually in use — advertising the
+    address of a different interface would send a technician to the
+    wrong host. It is empty when the transport came from the
+    environment override or from MQTT (neither names an interface).
+    """
+
+    transport: Transport = Transport.UNKNOWN
+    source: str = "none"  # "env" | "route" | "mqtt" | "none"
+    updated_at: float = 0.0  # monotonic time of the reading
+    interface: str = ""
+
+    @property
+    def is_known(self) -> bool:
+        return self.transport.is_known
+
+
+class TransportSource:
+    """Resolves the active transport, rate-limiting the route query.
+
+    This is the mDNS container's half of the shared transport
+    contract. Its resolution semantics mirror
+    `rotary_display.net.transport_source.TransportSource` in the
+    AquaButler-Server repo (the other half) so the display's
+    `LINK:` line and this container's `transport` TXT record can
+    never contradict each other.
+
+    The route query is rate-limited by `refresh_interval_sec`: at
+    most one query per interval, no matter how often the state is
+    read. The value still comes from a real route query — only the
+    *frequency* of the query changes. A query that fails yields
+    UNKNOWN; a previous success is never carried forward.
+    """
+
+    def __init__(
+        self,
+        runner: Callable[..., Any] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        stale_after_sec: float = DEFAULT_STALE_AFTER_SEC,
+        query: Callable[..., TransportReading] | None = None,
+        refresh_interval_sec: float = DEFAULT_REFRESH_INTERVAL_SEC,
+    ) -> None:
+        self._clock = clock
+        self._stale_after_sec = stale_after_sec
+        self._refresh_interval_sec = refresh_interval_sec
+        if query is not None:
+            self._query = query
+        elif runner is not None:
+            self._query = lambda: query_active_transport(runner=runner)
+        else:
+            self._query = query_active_transport
+
+        # The MQTT-sourced reading, if any.
+        self._mqtt_transport: Transport = Transport.UNKNOWN
+        self._mqtt_updated_at: float = 0.0
+
+        # The cached route reading and the time at which the next
+        # route query becomes due. `_route_reading` is UNKNOWN until
+        # the first query runs.
+        self._route_reading: TransportReading = UNKNOWN_READING
+        self._route_updated_at: float = 0.0
+        self._next_route_query_at: float = 0.0
+
+    # ---- properties ----
+
+    @property
+    def state(self) -> TransportState:
+        """The current transport state, with staleness applied."""
+        return self._resolve()
+
+    @property
+    def transport(self) -> Transport:
+        """The current active transport (UNKNOWN when unresolvable)."""
+        return self.state.transport
+
+    # ---- inputs ----
+
+    def apply_mqtt_link(self, payload: dict[str, Any], now: float | None = None) -> None:
+        """Record a transport value received on `pool/<id>/status/link`.
+
+        The payload may carry the transport as `value` (the standard
+        status-topic shape) or as a named `transport` field. Anything
+        unrecognised is recorded as UNKNOWN rather than being silently
+        ignored, so a malformed publisher surfaces as "unknown"
+        rather than a stale value.
+
+        This path is deliberately NOT rate-limited: a transport change
+        announced over MQTT is applied immediately.
+        """
+        if now is None:
+            now = self._clock()
+        raw: Any = payload.get("value")
+        if raw is None:
+            raw = payload.get("transport")
+        transport = Transport.from_str(raw if raw is None else str(raw))
+        self._mqtt_transport = transport
+        self._mqtt_updated_at = now if transport.is_known else 0.0
+        log.debug("mqtt link -> %s", transport.value)
+
+    # ---- resolution ----
+
+    def _route_reading_if_due(self, now: float) -> TransportReading:
+        """Return the cached route reading, refreshing it if due.
+
+        The query runs at most once per `refresh_interval_sec`. This
+        is the *frequency* control only — the value still comes from
+        a real route query, and a query that fails still yields
+        UNKNOWN (never a guess carried forward from a previous
+        success).
+        """
+        if now < self._next_route_query_at:
+            return self._route_reading
+
+        reading = self._query()
+        self._route_reading = reading
+        self._route_updated_at = now
+        self._next_route_query_at = now + self._refresh_interval_sec
+        return reading
+
+    def _resolve(self) -> TransportState:
+        now = self._clock()
+
+        override = transport_env_override()
+        if override is not None:
+            return TransportState(
+                transport=override, source="env", updated_at=now
+            )
+
+        reading = self._route_reading_if_due(now)
+        if reading.is_known:
+            return TransportState(
+                transport=reading.transport,
+                source=reading.source,
+                updated_at=self._route_updated_at,
+                interface=reading.interface,
+            )
+
+        # Route query didn't answer — fall back to the MQTT value if
+        # it is still fresh.
+        if self._mqtt_transport.is_known:
+            age = now - self._mqtt_updated_at
+            if age <= self._stale_after_sec:
+                return TransportState(
+                    transport=self._mqtt_transport,
+                    source="mqtt",
+                    updated_at=self._mqtt_updated_at,
+                )
+            log.debug(
+                "mqtt transport stale (age=%.1fs > %.1fs) -> UNKNOWN",
+                age,
+                self._stale_after_sec,
+            )
+
+        return TransportState(transport=Transport.UNKNOWN, source="none", updated_at=now)
+
+
 __all__ = [
     "Transport",
     "TransportReading",
+    "TransportSource",
+    "TransportState",
+    "STATUS_LINK_LEAF",
+    "DEFAULT_REFRESH_INTERVAL_SEC",
+    "DEFAULT_STALE_AFTER_SEC",
     "UNKNOWN_READING",
     "ROUTE_PROBE_TARGET",
     "parse_route_interface",

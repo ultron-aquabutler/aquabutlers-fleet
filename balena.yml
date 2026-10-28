@@ -289,6 +289,13 @@ services:
       # The address moves on a DHCP lease renewal; the transport moves
       # when the unit switches between Ethernet and WiFi.
       - "AQUABUTLER_POLL_INTERVAL=15"
+      # Minimum seconds between two route queries. The route query is
+      # a `fork`/`exec` of `ip`, so it is rate-limited rather than
+      # run per poll cycle. The transport only changes on a network
+      # reconnect, so 2 s of resolution latency is invisible to a
+      # technician. Same default the rotary display uses, so the two
+      # containers resolve the transport on the same cadence.
+      - "AQUABUTLER_TRANSPORT_REFRESH_SEC=2"
     healthcheck:
       interval: 60s
       timeout: 8s
