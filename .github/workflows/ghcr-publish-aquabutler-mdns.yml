@@ -1,0 +1,97 @@
+name: Publish aquabutler-mdns - GHCR
+
+# Publishes the device's mDNS advertiser to GHCR so balenaOS can pull
+# it on the customer's device.
+#
+# The image is built for the ARM targets the AquaButler carrier runs
+# on (a Raspberry Pi CM4) as well as amd64, so the same image can be
+# pulled by the balena device and by a technician's dev laptop.
+#
+# Policy: docs/Ethernet-deployment-policy.md §2 in
+#   ultron-aquabutler/AquaButler-Server (PR #35).
+#
+# The `packages: write` permission below is what makes the push
+# possible — the workflow's own GITHUB_TOKEN gets it automatically.
+# Pushing from a laptop needs a PAT with `write:packages`, which the
+# local dev credentials do not carry; that is why publishing happens
+# here rather than in the entrypoint.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'aquabutler-mdns/**'
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    paths:
+      - 'aquabutler-mdns/**'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/aquabutler-mdns
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=aquabutler-mdns
+            org.opencontainers.image.description=AquaButler device mDNS advertiser — publishes _aquabutler._tcp on the customer's residential LAN.
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./aquabutler-mdns
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run the unit tests
+        # The image is only useful if the payload stays secret-free and
+        # the TXT key set stays exactly as policy defines. Run the
+        # suite before the push, not after.
+        run: |
+          python3 -m pip install --quiet pytest
+          cd aquabutler-mdns && python3 -m pytest -q
+
+      - name: Echo published tags
+        run: |
+          echo "Published: ${{ steps.meta.outputs.tags }}"

@@ -54,6 +54,11 @@ docker:
   # Image SHA is set after first PR merge; pinning tracks fleet reproducibility.
   mqtt-bridge:
     image: ghcr.io/ultron-aquabutler/aquabutlers-mqtt-bridge:sha-601483e
+  # aquabutler-mdns — the device's LAN-local mDNS advertiser. Publishes
+  # `_aquabutler._tcp` on the customer's residential LAN. See the
+  # services block below and docs/Ethernet-deployment-policy.md §2.
+  aquabutler-mdns:
+    image: ghcr.io/ultron-aquabutler/aquabutler-mdns:latest
 
 # ----------------------------------------------------------------------------
 # poolController service — port of AQB-011 PR #1
@@ -226,6 +231,77 @@ services:
       - "org.opencontainers.image.title=aquabutlers-mqtt-bridge"
       - "org.opencontainers.image.description=Offline-resilient MQTT bridge for AquaButler CPE — SQLite outbox + QoS 2 for critical commands."
       - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/aquabutlers-mqtt-bridge"
+      - "org.opencontainers.image.licenses=AGPL-3.0-only"
+
+  # ----------------------------------------------------------------------
+  # aquabutler-mdns — LAN-local device discovery (policy §2)
+  # ----------------------------------------------------------------------
+  # Publishes the `_aquabutler._tcp` DNS-SD service on the CUSTOMER'S
+  # residential LAN so a technician's laptop can find the unit and its
+  # current address without the cloud. This is the LAN-local fallback
+  # for the offline-first behaviour the architecture is built around
+  # (AquaButler-Hardware/docs/Architecture.md §11).
+  #
+  # Policy:    docs/Ethernet-deployment-policy.md §2
+  #            (ultron-aquabutler/AquaButler-Server, PR #35)
+  # Procedure: docs/runbooks/residential-lan-field-guide.md §2
+  #
+  # `network_mode: host` is REQUIRED, not an optimisation. mDNS is
+  # link-local multicast (224.0.0.251:5353) and does not cross a
+  # routed boundary — a bridge-networked responder advertises onto the
+  # container's veth, not onto the customer's LAN, and the technician's
+  # laptop never sees it. This is also why the service does NOT live in
+  # the cloud-side CPE stack (`fleet/cpe-stack.yml`): a responder on the
+  # Aqua Swarm would be invisible to someone standing in the customer's
+  # living room.
+  #
+  # The advertised payload carries IDENTITY ONLY — unit_id,
+  # customer_id, sw_version, transport, ip. Never MQTT credentials, the
+  # OpenBalena device token, or the customer's WiFi passphrase: mDNS is
+  # unauthenticated and broadcast to everything on the segment.
+  aquabutler-mdns:
+    image: ghcr.io/ultron-aquabutler/aquabutler-mdns:latest
+    restart: always
+    # Host networking — see the note above. Do not change this.
+    network_mode: host
+    volumes:
+      # The generated avahi service file is bind-mounted so it is
+      # visible on the host for troubleshooting
+      # (`cat /etc/avahi/services/aquabutler.service`).
+      - "/etc/avahi/services/aquabutler.service:/etc/avahi/services/aquabutler.service"
+      # The customer ID, written by the provisioner on first boot.
+      - "/mnt/data/customer_id:/mnt/data/customer_id:ro"
+    environment:
+      # The unit's stable identity. Defaults to the balena device UUID
+      # (`BALENA_DEVICE_UUID`, injected by the supervisor); set it
+      # explicitly per device to override with a readable unit ID.
+      - "AQUABUTLER_UNIT_ID="
+      # The advertised software version. Defaults to the image's.
+      - "AQUABUTLER_SW_VERSION="
+      # The published service type and port are fixed by the policy
+      # (_aquabutler._tcp, 5150 = the device's own dashPanel UI).
+      # `AQUABUTLER_TRANSPORT` is an operator override for bench
+      # testing only — it is never inferred. Leave it unset in
+      # production; the container reads the active transport from the
+      # kernel's routing table.
+      - "AQUABUTLER_TRANSPORT="
+      # How often the advertised address and transport are re-resolved.
+      # The address moves on a DHCP lease renewal; the transport moves
+      # when the unit switches between Ethernet and WiFi.
+      - "AQUABUTLER_POLL_INTERVAL=15"
+    healthcheck:
+      interval: 60s
+      timeout: 8s
+      start_period: 30s
+      retries: 3
+      test: ["CMD", "avahi-daemon", "--check"]
+    labels:
+      - "io.balena.features.supervisor-api=1.2.0"
+      - "io.balena.features.balena-api=1.2.0"
+      - "io.balena.features.device-plugin=1.2.0"
+      - "org.opencontainers.image.title=aquabutler-mdns"
+      - "org.opencontainers.image.description=AquaButler device mDNS advertiser — publishes _aquabutler._tcp on the customer's residential LAN."
+      - "org.opencontainers.image.source=https://github.com/ultron-aquabutler/aquabutlers-fleet"
       - "org.opencontainers.image.licenses=AGPL-3.0-only"
 
 # ----------------------------------------------------------------------------
