@@ -36,16 +36,18 @@ version: 1.0.0
 # ----------------------------------------------------------------------------
 # Image sources (SHA-pinned)
 # ----------------------------------------------------------------------------
-# `ghcr.io/ultron-aquabutler/njspc:sha-1b90c02` is the immutable OCI index of
-# PR #1 (commit 1b90c02). Per-arch digests (verified 2026-08-26):
-#   amd64  sha256:0c75503b28851e93d126cbb8ff70a0d13e57d907432c3f7ff754a67badee7b56
-#   arm64  sha256:d8bc93d30aff49e10b9865ec6e987fbe91f6ccaa887706e314685a6b90dfc5b3
-#   arm/v7 sha256:3a494a9a1782a72c8631a7272cb1a3e155b22660844b26e3bf9f147b89086ee1
+# `ghcr.io/ultron-aquabutler/njspc:sha-d45fe6a` is the immutable OCI index of
+# PR #4 (merge commit d45fe6ab, parent 42f8d421) — the v10.0.2 merge of
+# upstream njsPC v8.3.0 -> v10.0.2. Per-arch digests (verified 2026-11-17
+# against GHCR, index mediaType application/vnd.oci.image.index.v1+json):
+#   amd64  sha256:45bdd1c2e37b79cda7c9790230c483324d5ba4c8f2c0481564aafca5d8195dcc
+#   arm64  sha256:594313ea08fa2321a5f48ce9d283adb691dc1e3e4791d5bffa4f3c5ea2c56cf8
+#   arm/v7 sha256:f5721c64928b86cfe954140220812b29f428f99f43f35a99dfdb7f9955d50da0
 # When the OpenBalena stack (t_6cae4233) is up, mirror once via skopeo copy
 # and point balena push at registry.loc.wallacearizona.us.
 docker:
   njspc:
-    image: ghcr.io/ultron-aquabutler/njspc:sha-1b90c02
+    image: ghcr.io/ultron-aquabutler/njspc:sha-d45fe6a
   dashboard:
     image: registry.loc.wallacearizona.us/ultron-aquabutler/njspc-dash:pending-pin
   rem:
@@ -72,7 +74,7 @@ services:
   poolController:
     # Reuse the prebuilt image. Drop the `image:` and add a `build:` block if
     # a future variant needs a custom build context.
-    image: ghcr.io/ultron-aquabutler/njspc:sha-1b90c02
+    image: ghcr.io/ultron-aquabutler/njspc:sha-d45fe6a
     hostname: poolcontroller
     user: node              # matches the node user in AquaButler-Control-njsPC Dockerfile
     restart: always
